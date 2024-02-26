@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import time
 import pyautogui
 
 work_zone = []
@@ -14,6 +15,7 @@ def select_work_zone(event, x, y, flags, param):
 
 def choose_work_zone():
     global work_zone
+    work_zone = []
     screen = pyautogui.screenshot()
     frame = np.array(screen)
     cv2.namedWindow("Select Work Zone")
@@ -27,10 +29,11 @@ def choose_work_zone():
             cv2.rectangle(frame_copy, work_zone[0], work_zone[1], (0, 255, 0), 2)
         cv2.imshow("Select Work Zone", frame_copy)
         
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord('q') or len(work_zone) == 2:
             break
     
     cv2.destroyAllWindows()
+    return work_zone  # Убедитесь, что возвращается переменная work_zone
 
 def find_colors(image):
     # Определяем нижний и верхний пороги для зеленого цвета в формате HSV
@@ -43,7 +46,6 @@ def find_colors(image):
     lower_red2 = np.array([170, 40, 40])
     upper_red2 = np.array([180, 255, 255])
 
-    # Определяем дополнительные цвета, привязанные к зеленой свече
     # Преобразуем изображение в формат HSV
     hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     
@@ -55,62 +57,128 @@ def find_colors(image):
     red_mask2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
     red_mask = cv2.bitwise_or(red_mask1, red_mask2)
     
-    # Объединяем результаты поиска зеленого, красного и дополнительных цветов
+    # Объединяем результаты поиска зеленого и красного цветов
     combined_mask = cv2.bitwise_or(green_mask, red_mask)
     
     # Находим контуры объектов на изображении
-    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Рисуем контуры объектов на изображении
-    cv2.drawContours(image, contours, -1, (150, 75, 0), 2)  # Изменено на коричневый цвет
+    # Отладочный код: рисуем контуры объектов на изображении
+    for contour in contours:
+        # Вычисляем ограничивающий прямоугольник для каждого контура
+        x, y, w, h = cv2.boundingRect(contour)
+        # Рисуем прямоугольник вокруг контура
+        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
     
-    return image
+    return image, contours
 
-def determine_trade_signal(candles, has_additional_color):
-    # Проверяем условия для долгосрочного входа (long entry)
-    if has_additional_color:
+def extract_candle_data(frame_with_colors, contours):
+    candles = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Определяем центры верхней и нижней части свечи
+        top_center = (x + w // 2, y)
+        bottom_center = (x + w // 2, y + h)
+
+        # Проверяем цвета в этих точках для определения, является ли свеча бычьей или медвежьей
+        if np.all(frame_with_colors[top_center[::-1]] == [255, 0, 0]) and np.all(frame_with_colors[bottom_center[::-1]] == [0, 0, 255]):
+            color = 'green'  # Зеленый цвет свечи
+            open_price = bottom_center[1]
+            close_price = top_center[1]
+        elif np.all(frame_with_colors[top_center[::-1]] == [0, 0, 255]) and np.all(frame_with_colors[bottom_center[::-1]] == [255, 0, 0]):
+            color = 'red'  # Красный цвет свечи
+            open_price = top_center[1]
+            close_price = bottom_center[1]
+        else:
+            continue  # Если цвета не соответствуют, пропускаем эту свечу
+
+        candles.append({'open': open_price, 'close': close_price, 'color': color})
+    
+    return candles
+
+
+
+def determine_trade_signal(candles):
+    # Проверяем, есть ли достаточно данных для анализа
+
+    print(len(candles))
+
+    if len(candles) < 2:
+        return None
+
+    print(len(candles))
+
+    # Получаем последние две свечи
+    last_candle = candles[-1]
+    prev_candle = candles[-2]
+
+    print(last_candle['color'], prev_candle['color'])
+
+    # Определяем условия для "длинной" позиции (long)
+    if last_candle['color'] == 'green' and last_candle['close'] > last_candle['open'] and \
+       last_candle['close'] > prev_candle['close'] and last_candle['open'] > prev_candle['open']:
         return "long"
-    # Проверяем условия для краткосрочного входа (short entry)
-    elif candles[-1]['close'] < candles[-2]['close'] or \
-            (candles[-1]['open'] > candles[-2]['open'] and candles[-1]['close'] < candles[-2]['close']):
+
+    # Определяем условия для "короткой" позиции (short)
+    elif last_candle['color'] == 'red' and last_candle['close'] < last_candle['open'] and \
+         last_candle['close'] < prev_candle['close'] and last_candle['open'] < prev_candle['open']:
         return "short"
+
     # Если нет сигнала для входа в сделку
     else:
         return None
 
+
+def debug_candle_detection(frame_with_colors, iteration):
+    # Сохраняем текущий кадр в файл для дебага
+    cv2.imwrite(f'debug_frame_{iteration}.png', frame_with_colors)
+
+
 def main():
-    global work_zone
-    choose_work_zone()
-    if len(work_zone) != 2:
+    work_zone = choose_work_zone()
+    if not work_zone or len(work_zone) != 2:
         print("Не выбраны оба угла. Программа завершается.")
         return
     
     print("Выбранная рабочая зона:", work_zone)
-    
-    candles = [
-        {'open': 100, 'close': 110},
-        {'open': 110, 'close': 105},
-        # Здесь может быть больше данных о свечах
-    ]
-    
+
     while True:
-        screen = pyautogui.screenshot(region=(*work_zone[0], work_zone[1][0] - work_zone[0][0], work_zone[1][1] - work_zone[0][1]))  # Регион области
+        start_time = time.time()
+
+        # Скриншот выбранной рабочей зоны
+        screen = pyautogui.screenshot(region=(
+            work_zone[0][0], work_zone[0][1],
+            work_zone[1][0] - work_zone[0][0],
+            work_zone[1][1] - work_zone[0][1]
+        ))
         frame = np.array(screen)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame_with_colors = find_colors(frame)
-        has_additional_color = np.any(np.all(frame == [102, 124, 131], axis=-1))
-        trade_signal = determine_trade_signal(candles, has_additional_color)
-        
+
+        # Обработка изображения для извлечения данных о свечах
+        frame_with_colors, contours = find_colors(frame)
+
+        candles = extract_candle_data(frame_with_colors, contours)
+
+        # Определение торгового сигнала на основе анализа свечей
+        trade_signal = determine_trade_signal(candles)
+
+        # Вывод торгового сигнала
         if trade_signal == "long":
             print("Сигнал на вход в сделку на LONG")
         elif trade_signal == "short":
             print("Сигнал на вход в сделку на SHORT")
-        
+
+        # Показ обработанного изображения
         cv2.imshow("Objects", frame_with_colors)
-        
+
+        # Выход из цикла по нажатию клавиши 'q'
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-    
+
+        # Пауза для следующего анализа через 5 секунд
+        time.sleep(max(0, 1 - (time.time() - start_time)))
+
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
